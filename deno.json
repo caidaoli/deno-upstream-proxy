@@ -1,0 +1,15 @@
+{
+  "tasks": {
+    "check": "deno check main.ts proxy.ts main_test.ts",
+    "dev": "deno run --allow-net --allow-env=UPSTREAM_URL --watch main.ts",
+    "test": "deno test --allow-env=UPSTREAM_URL",
+    "deploy": "deno deploy --org caidaoli --app deno-upstream-proxy --prod"
+  },
+  "deploy": {
+    "org": "caidaoli",
+    "app": "deno-upstream-proxy"
+  },
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.19"
+  }
+}
