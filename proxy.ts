@@ -1,5 +1,12 @@
 export interface ProxyConfig {
+  rootRedirectPath?: string;
+  upstreamHeaders?: UpstreamHeaders;
   upstreamUrl: URL;
+}
+
+export interface UpstreamHeaders {
+  origin?: string;
+  userAgent?: string;
 }
 
 const CORS_HEADERS = {
@@ -31,6 +38,11 @@ function readRequiredEnv(name: string): string {
   return value;
 }
 
+function readOptionalEnv(name: string): string | undefined {
+  const value = Deno.env.get(name);
+  return value === undefined || value === "" ? undefined : value;
+}
+
 function parseUpstreamUrl(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -42,13 +54,32 @@ function parseUpstreamUrl(value: string): URL {
 
 export function loadConfig(): ProxyConfig {
   return {
+    rootRedirectPath: readOptionalEnv("ROOT_REDIRECT_PATH"),
+    upstreamHeaders: loadUpstreamHeaders(),
     upstreamUrl: parseUpstreamUrl(readRequiredEnv("UPSTREAM_URL")),
   };
+}
+
+function loadUpstreamHeaders(): UpstreamHeaders | undefined {
+  const upstreamHeaders = {
+    origin: readOptionalEnv("UPSTREAM_ORIGIN_HEADER"),
+    userAgent: readOptionalEnv("UPSTREAM_USER_AGENT_HEADER"),
+  };
+
+  return Object.values(upstreamHeaders).some((value) => value !== undefined)
+    ? upstreamHeaders
+    : undefined;
 }
 
 function targetUrlFor(req: Request, upstreamUrl: URL): URL {
   const incomingUrl = new URL(req.url);
   return new URL(incomingUrl.pathname + incomingUrl.search, upstreamUrl.origin);
+}
+
+function targetWebSocketUrlFor(req: Request, upstreamUrl: URL): URL {
+  const targetUrl = targetUrlFor(req, upstreamUrl);
+  targetUrl.protocol = upstreamUrl.protocol === "https:" ? "wss:" : "ws:";
+  return targetUrl;
 }
 
 function requestBodyFor(req: Request): BodyInit | undefined {
@@ -75,10 +106,97 @@ function healthResponse(): Response {
   });
 }
 
-function isRootHealthRequest(req: Request): boolean {
+function redirectResponse(location: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: withCors({ location }),
+  });
+}
+
+function isRootRequest(req: Request): boolean {
   const url = new URL(req.url);
-  return (req.method === "GET" || req.method === "HEAD") &&
-    url.pathname === "/" && url.search === "";
+  return url.pathname === "/" && url.search === "";
+}
+
+function isWebSocketUpgrade(req: Request): boolean {
+  return req.headers.get("upgrade")?.toLowerCase() === "websocket";
+}
+
+function upstreamRequestHeadersFor(
+  requestHeaders: Headers,
+  config: ProxyConfig,
+): Headers {
+  const headers = new Headers(requestHeaders);
+  headers.delete("host");
+
+  if (config.upstreamHeaders?.origin) {
+    headers.set("origin", config.upstreamHeaders.origin);
+  }
+  if (config.upstreamHeaders?.userAgent) {
+    headers.set("user-agent", config.upstreamHeaders.userAgent);
+  }
+
+  return headers;
+}
+
+function sendWhenOpen(
+  socket: WebSocket,
+  data: string | ArrayBufferLike | Blob | ArrayBufferView,
+): boolean {
+  if (socket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+
+  socket.send(data);
+  return true;
+}
+
+function closeSocket(socket: WebSocket): void {
+  if (
+    socket.readyState === WebSocket.OPEN ||
+    socket.readyState === WebSocket.CONNECTING
+  ) {
+    socket.close();
+  }
+}
+
+function bridgeWebSockets(clientSocket: WebSocket, serverSocket: WebSocket) {
+  const pendingMessages: Array<
+    string | ArrayBufferLike | Blob | ArrayBufferView
+  > = [];
+
+  clientSocket.onmessage = (event) => {
+    if (!sendWhenOpen(serverSocket, event.data)) {
+      pendingMessages.push(event.data);
+    }
+  };
+  serverSocket.onopen = () => {
+    while (pendingMessages.length > 0) {
+      const message = pendingMessages.shift();
+      if (message !== undefined) {
+        sendWhenOpen(serverSocket, message);
+      }
+    }
+  };
+  serverSocket.onmessage = (event) => {
+    sendWhenOpen(clientSocket, event.data);
+  };
+
+  clientSocket.onerror = () => closeSocket(serverSocket);
+  serverSocket.onerror = () => closeSocket(clientSocket);
+  clientSocket.onclose = () => closeSocket(serverSocket);
+  serverSocket.onclose = () => closeSocket(clientSocket);
+}
+
+function proxyWebSocketRequest(req: Request, config: ProxyConfig): Response {
+  const targetUrl = targetWebSocketUrlFor(req, config.upstreamUrl);
+  console.log(`[proxy] WS ${targetUrl}`);
+
+  const { socket: clientSocket, response } = Deno.upgradeWebSocket(req);
+  const serverSocket = new WebSocket(targetUrl);
+  bridgeWebSockets(clientSocket, serverSocket);
+
+  return response;
 }
 
 async function proxyRequest(
@@ -86,8 +204,7 @@ async function proxyRequest(
   config: ProxyConfig,
 ): Promise<Response> {
   const targetUrl = targetUrlFor(req, config.upstreamUrl);
-  const headers = new Headers(req.headers);
-  headers.delete("host");
+  const headers = upstreamRequestHeadersFor(req.headers, config);
 
   console.log(`[proxy] ${req.method} ${targetUrl}`);
 
@@ -117,8 +234,18 @@ export function createHandler(
       return preflightResponse();
     }
 
-    if (isRootHealthRequest(req)) {
-      return healthResponse();
+    if (isWebSocketUpgrade(req)) {
+      return proxyWebSocketRequest(req, config);
+    }
+
+    if (isRootRequest(req)) {
+      if (req.method === "GET" && config.rootRedirectPath) {
+        return redirectResponse(config.rootRedirectPath);
+      }
+
+      if (req.method === "GET" || req.method === "HEAD") {
+        return healthResponse();
+      }
     }
 
     try {

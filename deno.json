@@ -1,8 +1,8 @@
 {
   "tasks": {
     "check": "deno check main.ts proxy.ts main_test.ts",
-    "dev": "deno run --allow-net --allow-env=UPSTREAM_URL --watch main.ts",
-    "test": "deno test --allow-env=UPSTREAM_URL",
+    "dev": "deno run --allow-net --allow-env=UPSTREAM_URL,ROOT_REDIRECT_PATH,UPSTREAM_ORIGIN_HEADER,UPSTREAM_USER_AGENT_HEADER --watch main.ts",
+    "test": "deno test --allow-env=UPSTREAM_URL,ROOT_REDIRECT_PATH,UPSTREAM_ORIGIN_HEADER,UPSTREAM_USER_AGENT_HEADER --allow-net=127.0.0.1",
     "deploy": "deno deploy --org caidaoli --app deno-upstream-proxy --prod"
   },
   "deploy": {
