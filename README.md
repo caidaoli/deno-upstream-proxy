@@ -1,5 +1,7 @@
 # deno-upstream-proxy
 
+English | [简体中文](./README.zh-CN.md)
+
 A small Deno HTTP/WebSocket upstream proxy designed for Deno Deploy.
 
 It forwards incoming requests to a single configured upstream origin, preserves
